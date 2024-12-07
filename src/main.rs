@@ -1,25 +1,22 @@
+mod db;
+mod handlers;
+mod routes;
+
 use dotenvy::dotenv;
-use mongodb::{options::ClientOptions, Client};
-use std::env;
+use std::error::Error;
 
 #[tokio::main]
-async fn main() -> mongodb::error::Result<()> {
-    // Завантажуємо змінні середовища з .env файлу
+async fn main() -> Result<(), Box<dyn Error>> {
     dotenv().ok();
 
-    // Отримуємо URI з середовища
-    let uri = env::var("MONGODB_URI").expect("Змінна середовища MONGODB_URI не встановлена");
+    // Підключення до бази даних
+    let db = db::connect_to_db().await?;
 
-    // Налаштування клієнта MongoDB
-    let options = ClientOptions::parse(&uri).await?;
-    let client = Client::with_options(options)?;
+    // Реєстрація маршрутів
+    let register = routes::register_routes(db);
 
-    // Перевірка підключення
-    println!("Підключення до MongoDB успішне!");
-
-    // Отримання доступу до бази даних
-    let db = client.database("chat_app");
-    println!("Використовується база даних: {}", db.name());
+    // Запуск сервера
+    warp::serve(register).run(([127, 0, 0, 1], 3030)).await;
 
     Ok(())
 }
