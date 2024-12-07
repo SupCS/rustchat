@@ -1,14 +1,15 @@
 use bcrypt::{hash, verify, DEFAULT_COST};
-use jsonwebtoken::{encode, EncodingKey, Header};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use mongodb::{
     bson::{doc, Document},
     Database,
 };
 use serde::{Deserialize, Serialize};
 use warp::{http::StatusCode, reject::Reject};
+use warp::{reject, Rejection};
 
 #[derive(Debug)]
-struct CustomError(String);
+pub struct CustomError(pub String);
 
 impl Reject for CustomError {}
 
@@ -126,5 +127,29 @@ pub async fn login_user(
     // Якщо користувача не знайдено або пароль невірний
     Ok(warp::reply::json(&serde_json::json!({
         "error": "Невірний логін або пароль"
+    })))
+}
+
+/// Перевірка JWT-токена
+pub async fn authorize_user(token: String) -> Result<String, Rejection> {
+    let secret = std::env::var("JWT_SECRET").expect("JWT_SECRET не встановлено");
+
+    let token_data = decode::<Claims>(
+        &token,
+        &DecodingKey::from_secret(secret.as_ref()),
+        &Validation::default(),
+    )
+    .map_err(|_| reject::custom(CustomError("Невалідний токен".to_string())))?;
+
+    Ok(token_data.claims.sub)
+}
+
+pub async fn protected_handler(
+    username: String,
+    db: Database,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    Ok(warp::reply::json(&serde_json::json!({
+        "message": "Ласкаво просимо до захищеного маршруту",
+        "user": username
     })))
 }

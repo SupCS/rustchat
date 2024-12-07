@@ -16,9 +16,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Реєстрація маршрутів
     let register = routes::register_routes(db.clone());
     let login = routes::login_routes(db.clone());
+    let protected = routes::protected_routes(db.clone());
 
     // Об'єднання маршрутів
-    let routes = register.or(login);
+    let routes = register.or(login).or(protected);
 
     // Запуск сервера
     warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
