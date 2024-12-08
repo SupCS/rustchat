@@ -1,6 +1,6 @@
 use crate::handlers::{
-    authorize_user, get_messages, login_user, protected_handler, register_user, send_message,
-    CustomError, LoginRequest, Message, RegisterRequest,
+    authorize_user, current_user, get_chats, get_messages, login_user, protected_handler,
+    register_user, send_message, CustomError, LoginRequest, Message, RegisterRequest,
 };
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
@@ -57,10 +57,9 @@ fn with_db(
     warp::any().map(move || db.clone())
 }
 
-#[derive(serde::Deserialize)]
-struct QueryParams {
-    sender: String,
-    receiver: String,
+#[derive(Deserialize)]
+pub struct QueryParams {
+    pub partner: String,
 }
 pub fn message_routes(
     db: Database,
@@ -75,13 +74,40 @@ pub fn message_routes(
     let get = warp::path("messages")
         .and(warp::get())
         .and(with_auth())
-        .and(warp::query::<QueryParams>()) // Використання структури
+        .and(warp::query::<QueryParams>()) // QueryParams: { partner: String }
         .and(with_db(db))
         .and_then(
             |auth_user: String, params: QueryParams, db: Database| async move {
-                get_messages(auth_user, params.sender, params.receiver, db).await
+                get_messages(auth_user, params.partner, db).await
             },
         );
 
     send.or(get)
+}
+
+/// Маршрут для отримання поточного користувача
+pub fn current_user_route(
+) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    warp::path("current_user")
+        .and(warp::get())
+        .and(with_auth()) // Middleware для перевірки JWT
+        .and_then(current_user)
+}
+
+/// Маршрут для отримання списку чатів
+pub fn chats_route(
+    db: Database,
+) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    warp::path("chats")
+        .and(warp::get())
+        .and(with_auth()) // Middleware для перевірки JWT
+        .and(with_db(db))
+        .and_then(get_chats)
+}
+
+/// Логаут користувача
+pub fn logout_routes() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    warp::path("logout")
+        .and(warp::post())
+        .map(|| warp::reply::with_status("Logout successful", warp::http::StatusCode::OK))
 }

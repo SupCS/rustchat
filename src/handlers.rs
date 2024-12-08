@@ -7,7 +7,7 @@ use mongodb::{
     Database,
 };
 use serde::{Deserialize, Serialize};
-use warp::{http::StatusCode, reject::Reject};
+use warp::{http::StatusCode, reject::Reject, Reply};
 use warp::{reject, Rejection};
 
 #[derive(Debug)]
@@ -46,12 +46,26 @@ pub struct Message {
     pub timestamp: chrono::DateTime<chrono::Utc>, // Час відправлення
 }
 
-/// Реєстрація нового користувача
 pub async fn register_user(
     req: RegisterRequest,
     db: Database,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let users = db.collection::<Document>("users");
+
+    // Валідація логіна та пароля
+    if req.username.len() < 3 {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&"Логін має бути не менше 3 символів"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+
+    if req.password.len() < 3 {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&"Пароль має бути не менше 3 символів"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
 
     // Перевіряємо, чи користувач уже існує
     if let Ok(Some(_)) = users.find_one(doc! {"username": &req.username}, None).await {
@@ -84,12 +98,28 @@ pub async fn register_user(
     ))
 }
 
-/// Вхід користувача
 pub async fn login_user(
     req: LoginRequest,
     db: Database,
-) -> Result<impl warp::Reply, warp::Rejection> {
+) -> Result<warp::reply::Response, warp::Rejection> {
     let users = db.collection::<Document>("users");
+
+    // Валідація логіна та пароля
+    if req.username.len() < 3 {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&"Логін має бути не менше 3 символів"),
+            StatusCode::BAD_REQUEST,
+        )
+        .into_response());
+    }
+
+    if req.password.len() < 3 {
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&"Пароль має бути не менше 3 символів"),
+            StatusCode::BAD_REQUEST,
+        )
+        .into_response());
+    }
 
     // Знаходимо користувача в базі
     let user = users
@@ -130,14 +160,18 @@ pub async fn login_user(
                 warp::reject::custom(CustomError("Помилка генерації токена".to_string()))
             })?;
 
-            return Ok(warp::reply::json(&LoginResponse { token }));
+            return Ok(warp::reply::json(&LoginResponse { token }).into_response());
         }
     }
 
     // Якщо користувача не знайдено або пароль невірний
-    Ok(warp::reply::json(&serde_json::json!({
-        "error": "Невірний логін або пароль"
-    })))
+    Ok(warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "error": "Невірний логін або пароль"
+        })),
+        StatusCode::UNAUTHORIZED,
+    )
+    .into_response())
 }
 
 /// Перевірка JWT-токена
@@ -225,31 +259,25 @@ pub async fn send_message(
 
 pub async fn get_messages(
     auth_user: String,
-    sender: String,
-    receiver: String,
+    partner: String,
     db: Database,
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let messages = db.collection::<Document>("messages");
 
-    // Перевіряємо, чи auth_user має доступ до повідомлень
-    if auth_user != sender && auth_user != receiver {
-        return Ok(warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({
-                "error": "Ви не маєте доступу до цих повідомлень"
-            })),
-            warp::http::StatusCode::FORBIDDEN,
-        ));
-    }
-
-    // Знаходимо всі повідомлення між двома користувачами
+    // Фільтр для вибірки повідомлень між auth_user і partner
     let filter = doc! {
         "$or": [
-            { "sender": &sender, "receiver": &receiver },
-            { "sender": &receiver, "receiver": &sender }
+            { "sender": &auth_user, "receiver": &partner },
+            { "sender": &partner, "receiver": &auth_user }
         ]
     };
 
-    let mut cursor = messages.find(filter, None).await.map_err(|_| {
+    // Сортуємо повідомлення за часом у порядку зростання
+    let options = mongodb::options::FindOptions::builder()
+        .sort(doc! { "timestamp": 1 })
+        .build();
+
+    let mut cursor = messages.find(filter, options).await.map_err(|_| {
         warp::reject::custom(CustomError("Не вдалося отримати повідомлення".to_string()))
     })?;
 
@@ -266,8 +294,58 @@ pub async fn get_messages(
         }
     }
 
-    Ok(warp::reply::with_status(
-        warp::reply::json(&message_list),
-        warp::http::StatusCode::OK,
-    ))
+    Ok(warp::reply::json(&message_list))
+}
+
+/// Отримання залогіненого користувача
+pub async fn current_user(auth_user: String) -> Result<impl warp::Reply, warp::Rejection> {
+    Ok(warp::reply::json(&serde_json::json!({
+        "username": auth_user
+    })))
+}
+
+/// Отримання списку чатів для поточного користувача
+pub async fn get_chats(
+    auth_user: String,
+    db: Database,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let messages = db.collection::<Document>("messages");
+
+    // Фільтр для вибірки повідомлень, де поточний користувач є відправником або отримувачем
+    let filter = doc! {
+        "$or": [
+            { "sender": &auth_user },
+            { "receiver": &auth_user }
+        ]
+    };
+
+    // Отримуємо всі відповідні повідомлення
+    let mut cursor = messages.find(filter, None).await.map_err(|_| {
+        warp::reject::custom(CustomError("Не вдалося отримати список чатів".to_string()))
+    })?;
+
+    let mut chat_partners = std::collections::HashSet::new();
+
+    while let Some(result) = cursor.next().await {
+        if let Ok(doc) = result {
+            // Додаємо співрозмовників до списку (уникальні імена)
+            if let Some(sender) = doc.get_str("sender").ok() {
+                if sender != auth_user {
+                    chat_partners.insert(sender.to_string());
+                }
+            }
+            if let Some(receiver) = doc.get_str("receiver").ok() {
+                if receiver != auth_user {
+                    chat_partners.insert(receiver.to_string());
+                }
+            }
+        }
+    }
+
+    let chat_list: Vec<String> = chat_partners.into_iter().collect();
+
+    // Повертаємо список чатів у відповіді
+    Ok(warp::reply::json(&serde_json::json!({
+        "chats": chat_list
+    })))
 }
